@@ -100,6 +100,8 @@ summary { cursor: pointer; font-weight: 700; }
 .demo-arrow { flex: none; }
 #trip { max-width: 660px; margin-inline: auto; }
 .trip-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .9rem; font-weight: 700; }
+.trip-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; }
+.trip-controls button { white-space: nowrap; }
 #progress-fill { display: block; width: 100%; height: 5px; border: 0; margin-bottom: 14px; accent-color: var(--green); border-radius: 20px; overflow: hidden; }
 #progress-fill::-webkit-progress-bar { background: #cfded4; }
 #progress-fill::-webkit-progress-value { background: var(--green); }
@@ -164,3 +166,100 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--green); width:
   .station-fields { padding-left: 20px; }
   .place::before { left: -20px; }
 }
+
+.ride-strip { margin: 12px 0 4px; padding: 12px; background: #f2f7f3; border: 1px solid var(--edge); border-radius: 9px; }
+.ride-strip h2 { font-size: 1rem; margin-bottom: 4px; }
+.ride-strip-track {
+  display: grid;
+  grid-template-columns: repeat(var(--ride-columns, 4), minmax(0, 1fr));
+  row-gap: 6px;
+  margin: 0;
+  padding: 3px 0 0;
+  list-style: none;
+  --ride-dot-y: 15px;
+}
+.ride-strip-track li { position: relative; min-width: 0; min-height: 52px; text-align: center; }
+.ride-strip-track li[data-link]::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  top: var(--ride-dot-y);
+  width: 100%;
+  border-top: 3px var(--ride-link-style, solid) var(--ride-line);
+}
+.ride-strip-track li[data-link=""]::after { content: none; }
+.ride-strip-track li[data-link="right"]::after { left: 50%; }
+.ride-strip-track li[data-link="left"]::after { right: 50%; }
+.ride-strip-track li[data-link="turn-right"]::after,
+.ride-strip-track li[data-link="turn-left"]::after {
+  width: 50%;
+  height: calc(100% + 6px);
+  border-bottom: 3px var(--ride-link-style, solid) var(--ride-line);
+}
+.ride-strip-track li[data-link="turn-right"]::after {
+  left: 50%;
+  border-right: 3px var(--ride-link-style, solid) var(--ride-line);
+  border-radius: 0 14px 14px 0;
+}
+.ride-strip-track li[data-link="turn-left"]::after {
+  right: 50%;
+  border-left: 3px var(--ride-link-style, solid) var(--ride-line);
+  border-radius: 14px 0 0 14px;
+}
+.ride-strip-track li[data-link="down"]::after {
+  width: 0;
+  height: calc(100% + 6px);
+  left: 8px;
+  border: 0;
+  border-left: 3px var(--ride-link-style, solid) var(--ride-line);
+}
+.ride-strip-track[data-columns="1"] .ride-stop { align-items: flex-start; padding-left: 24px; text-align: left; }
+.ride-strip-track[data-columns="1"] .ride-stop-dot { position: absolute; left: 0; }
+.ride-strip-track li[data-passed]::after { opacity: .4; }
+.ride-strip-track li[data-after]::after { --ride-link-style: dashed; }
+.ride-stop { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; width: 100%; height: 100%; padding: 6px 3px 3px; border: 0; background: transparent; color: var(--ink); font-size: .84rem; line-height: 1.3; overflow-wrap: anywhere; }
+.ride-stop-dot { width: 18px; height: 18px; border: 3px solid var(--ride-line); border-radius: 50%; background: white; flex: none; }
+.ride-stop[aria-current] .ride-stop-dot { background: var(--ride-line); box-shadow: inset 0 0 0 2px white; }
+.ride-stop[aria-current] small { color: var(--green-dark); font-weight: 750; }
+.ride-strip-track li[data-passed] .ride-stop { color: var(--muted); }
+.ride-strip-track li[data-passed] .ride-stop-dot { background: #e2e9e4; border-color: #6c8074; }
+.ride-stop.ride-destination small { font-weight: 800; color: var(--green-dark); }
+.ride-stop.ride-destination .ride-stop-dot { border-radius: 4px; }
+.ride-stop:focus-visible { outline-offset: -2px; }
+.ride-stop small { font-size: .74rem; }
+.transfer-layout { margin: 0 0 15px; padding: 14px; border: 1px solid var(--edge); border-radius: 12px; }
+.transfer-layout h2 { margin: 0 0 10px; font-size: 1rem; }
+.transfer-platforms, .transfer-levels { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 10px; margin: 0; }
+.transfer-platforms dt, .transfer-levels dt { font-weight: 700; color: var(--green); }
+.transfer-platforms dd, .transfer-levels dd { margin: 0; overflow-wrap: anywhere; }
+.transfer-advice { margin: 10px 0 0; padding: 9px 10px; background: #eaf5ef; border-radius: 8px; color: #164a35; }
+.transfer-levels { margin-top: 10px; font-size: .9rem; }
+.station-guide, .ride-timer {
+  margin-top: 16px;
+  padding: 13px;
+  background: #f2f7f3;
+  border: 1px solid var(--edge);
+  border-radius: 9px;
+}
+.station-guide h2, .ride-timer h2 { font-size: 1rem; margin-bottom: 5px; }
+.station-guide > p { margin-top: 6px; overflow-wrap: anywhere; }
+.station-guide .station-transfer { color: var(--ink); font-weight: 750; }
+.station-links { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
+.station-links a { color: var(--green); font-size: .86rem; }
+.station-guide small { margin-top: 5px; }
+.ride-timer { background: #eef6ee; }
+.ride-countdown { font-size: 1.2rem; font-weight: 800; color: var(--green-dark); font-variant-numeric: tabular-nums; }
+.ride-countdown.timer-due { color: #7d5005; }
+.timing-source { font-size: .9rem; }
+.ride-timer a { color: var(--green); }
+.ride-timer details { margin-top: 8px; }
+.timer-inputs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.timer-inputs input { margin-top: 4px; }
+.timer-access { margin-top: 8px; }
+.timer-access p { color: #79540c; font-size: .87rem; }
+.timer-access .quiet { margin-top: 0; }
+.mini-mode { background: var(--green-dark); }
+.mini-mode .site-header, .mini-mode main, .mini-mode dialog { display: none !important; }
+#mini-ride { min-height: 100dvh; display: grid; align-content: center; gap: 3px; padding: 5px 9px; color: #fff; }
+#mini-title { font-size: clamp(11px, 8vw, 24px); line-height: 1.2; overflow-wrap: anywhere; }
+#mini-info { color: #e4f6e8; font-size: clamp(9px, 5.5vw, 16px); line-height: 1.3; }

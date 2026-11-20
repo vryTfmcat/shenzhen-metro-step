@@ -1,16 +1,22 @@
 package local.metrostep.android;
 
+import android.Manifest;
 import android.app.Activity;
+import android.app.PictureInPictureParams;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.util.Base64;
+import android.util.Rational;
 import android.view.WindowInsets;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
@@ -37,12 +43,14 @@ public final class MainActivity extends Activity {
     private static final String HOST = "appassets.androidplatform.net";
     private static final String ORIGIN = "https://" + HOST;
     private static final List<String> EXTERNAL = Arrays.asList(
-            "www.szmc.net", "www.amap.com", "console.amap.com");
+            "www.szmc.net", "www.amap.com", "console.amap.com", "www.mtrsz.com.cn",
+            "jtys.sz.gov.cn", "www.lg.gov.cn", "www.sz.gov.cn");
     private static final int PICK_FILE = 1001;
     private static final int CAPTURE_PHOTO = 1002;
     private static final int SAVE_EXPORT = 1003;
+    private static final int NOTIFICATION_REQUEST = 1004;
 
-    private final AmapApi amap = new AmapApi();
+    private AmapApi amap;
     private WebView browser;
     private ValueCallback<Uri[]> fileCallback;
     private Uri capture;
@@ -50,6 +58,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        amap = new AmapApi(this);
         if (Build.VERSION.SDK_INT >= 30) {
             getWindow().setDecorFitsSystemWindows(false);
         }
@@ -58,6 +67,7 @@ public final class MainActivity extends Activity {
         browser.setBackgroundColor(Color.rgb(237, 242, 238));
         WebSettings settings = browser.getSettings();
         settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(true);
         settings.setGeolocationEnabled(false);
@@ -221,6 +231,65 @@ public final class MainActivity extends Activity {
     }
 
     public final class ExportBridge {
+        @JavascriptInterface public void syncTrip(String raw) {
+            if (raw != null && raw.length() <= 1024) {
+                runOnUiThread(() -> TripReminder.update(MainActivity.this, raw));
+            }
+        }
+
+        @JavascriptInterface public boolean exactAlarmEnabled() {
+            return TripReminder.exactAvailable(MainActivity.this);
+        }
+
+        @JavascriptInterface public void previewAlarm() {
+            runOnUiThread(() -> {
+                if (TripReminder.canNotify(MainActivity.this) && TripReminder.alertChannelEnabled(MainActivity.this)) {
+                    TripReminder.preview(MainActivity.this);
+                } else {
+                    enableRideNotifications(true);
+                }
+            });
+        }
+
+        @JavascriptInterface public void stopAlarm() {
+            runOnUiThread(() -> TripReminder.stopRinging(MainActivity.this));
+        }
+
+        @JavascriptInterface public boolean notificationsEnabled() {
+            return TripReminder.canNotify(MainActivity.this) && TripReminder.alertChannelEnabled(MainActivity.this);
+        }
+
+        @JavascriptInterface public void requestRideNotifications() {
+            runOnUiThread(() -> enableRideNotifications(false));
+        }
+
+        @JavascriptInterface public void openNotificationSettings() {
+            runOnUiThread(() -> enableRideNotifications(true));
+        }
+
+        @JavascriptInterface public void openExactAlarmSettings() {
+            if (Build.VERSION.SDK_INT < 31) return;
+            runOnUiThread(() -> openSettings(new Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                    Uri.fromParts("package", getPackageName(), null))));
+        }
+
+        @JavascriptInterface public boolean supportsMiniWindow() {
+            return getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE);
+        }
+
+        @JavascriptInterface public void openMiniWindow() {
+            runOnUiThread(() -> {
+                try {
+                    PictureInPictureParams params = new PictureInPictureParams.Builder()
+                            .setAspectRatio(new Rational(16, 9)).build();
+                    if (enterPictureInPictureMode(params)) return;
+                } catch (IllegalStateException | IllegalArgumentException ignored) {
+                    // Disabled by the device or unavailable in the current window mode.
+                }
+                Toast.makeText(MainActivity.this, "小窗未开启，仍可在通知栏查看行程。", Toast.LENGTH_SHORT).show();
+            });
+        }
+
         @JavascriptInterface public void saveOffline(String html) {
             runOnUiThread(() -> {
                 if (pendingExport != null || html == null || html.length() > 1_000_000) {
@@ -239,6 +308,51 @@ public final class MainActivity extends Activity {
                     finishExport("error");
                 }
             });
+        }
+    }
+
+    private void enableRideNotifications(boolean explicit) {
+        if (TripReminder.canNotify(this) && TripReminder.alertChannelEnabled(this)) return;
+        boolean asked = getPreferences(MODE_PRIVATE).getBoolean("askedNotifications", false);
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED && (!asked ||
+                (explicit && shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)))) {
+            getPreferences(MODE_PRIVATE).edit().putBoolean("askedNotifications", true).apply();
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_REQUEST);
+        } else if (explicit) {
+            openSettings(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+        }
+    }
+
+    private void openSettings(Intent settings) {
+        try {
+            startActivity(settings);
+        } catch (ActivityNotFoundException error) {
+            Toast.makeText(this, "请在系统设置里为地铁单步导航调整权限。", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request == NOTIFICATION_REQUEST) refreshTripPresentation();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        refreshTripPresentation();
+    }
+
+    private void refreshTripPresentation() {
+        if (browser != null) {
+            browser.evaluateJavascript("window.refreshAndroidReminder?.()", null);
+        }
+    }
+
+    @Override public void onPictureInPictureModeChanged(boolean mini, Configuration configuration) {
+        super.onPictureInPictureModeChanged(mini, configuration);
+        if (browser != null) {
+            browser.evaluateJavascript("window.setMetroMiniMode?.(" + mini + ")", null);
         }
     }
 

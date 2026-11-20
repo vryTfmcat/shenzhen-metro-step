@@ -74,7 +74,7 @@ function parseRoutes(data, start, end) {
           via.length === Number(rail.via_num)
         const lineName = line.replace(/^地铁\s*/, '').trim()
         legs.push({line: lineName, color: colorForLine(lineName), direction: ends.length > 1 ? ends.at(-1) : '',
-          opposite: ends.length > 1 ? ends[0] : '', from, to,
+          opposite: ends.length > 1 ? ends[0] : '', from, to, seconds: Number(rail.duration) || 0,
           stops: complete ? [...via, to] : [to], complete, walk, entrance: clean(segment.entrance?.name)})
         walk = []
         exit = ''
@@ -344,6 +344,7 @@ function status(id, message = '', error = false) {
 
 function setReady(value) {
   ready = value
+  $('clear-amap-key').hidden = !android || !ready
   $('key-open').textContent = ready ? '高德已连接' : '高德设置'
   $('key-open').classList.toggle('is-ready', ready)
 }
@@ -540,7 +541,7 @@ function startTrip(route) {
   clearPhoto()
   current = {
     route, steps: stepsFor(route), index: 0, paused: false, stopped: false,
-    lead: 2, sound: false, vibration: true, stationIndex: -1, alerted: false,
+    lead: 2, sound: false, vibration: true, stationIndex: -1, alerted: false, reminderAt: 0,
   }
   $('planner').hidden = true
   $('trip').hidden = false
@@ -557,7 +558,10 @@ function showTrip() {
 }
 
 function showPlanner(keepTrip) {
-  if (!keepTrip) current = null
+  if (!keepTrip) {
+    current = null
+    syncAndroidTrip()
+  }
   clearPhoto()
   $('trip').hidden = true
   $('planner').hidden = false
@@ -573,11 +577,22 @@ function clearPhoto() {
   photoUrl = ''
 }
 
-function advance() {
+function advance(startTimer = false) {
   clearPhoto()
   current.index += 1
   current.stationIndex = -1
   current.alerted = false
+  current.reminderAt = 0
+  current.timerMinutes = 0
+  current.timerLead = undefined
+  const step = current.steps[current.index]
+  current.timerSource = ''
+  const timetable = android && startTimer === true && step?.kind === 'ride' ? timetableFor(step.leg) : null
+  if (timetable) {
+    current.timerSource = 'timetable'
+    current.timerLead = Math.min(2, Math.max(0, Math.floor((timetable.seconds - 60) / 60)))
+    current.reminderAt = Date.now() + (timetable.seconds - current.timerLead * 60) * 1000
+  }
   status('trip-status')
   renderStep()
 }
@@ -587,6 +602,9 @@ function retreat() {
   current.index -= 1
   current.stationIndex = -1
   current.alerted = false
+  current.reminderAt = 0
+  current.timerMinutes = 0
+  current.timerLead = undefined
   status('trip-status')
   renderStep()
 }
@@ -614,12 +632,425 @@ function addDetails(panel, label, lines) {
   panel.append(details)
 }
 
-const stationSources = {
-  '会展中心': {
-    url: 'https://www.szmc.net/szmc_m/shentieyunying/yunyingzixun/wuzhangaichengchezhinan/line1/',
-    text: '运营方资料列出了 4 号线往牛湖和往福田口岸两处站台方向。按现场标识确认方向。',
+const stationData = JSON.parse($('station-data').content.textContent)
+const rideStorageKey = 'metro-active-trip-v1'
+
+const transferLayouts = {
+  岗厦北: {
+    floors: {'10号线': 'B3', '11号线': 'B2', '14号线': 'B2'},
+    levels: [['B2', '11、14号线 · 两座岛式站台'], ['B3', '10号线 · 与上层站台垂直布置']],
+    shared: ['11号线', '14号线'],
+    sources: ['https://jtys.sz.gov.cn/gkmlpt/content/11/11715/post_11715990.html',
+      'https://www.lg.gov.cn/xxgk/xwzx/zwdt/content/post_10184308.html'],
+  },
+  黄木岗: {
+    floors: {'7号线': 'B2 或 B3', '14号线': 'B2 或 B3'},
+    levels: [['B1', '站厅'], ['B2 / B3', '7、14号线 · 站台分两层']],
+    shared: ['7号线', '14号线'],
+    sources: ['https://www.sz.gov.cn/cn/xxgk/zfxxgj/zwdt/content/mpost_8595904.html'],
+  },
+  大运: {
+    floors: {'14号线': 'B3', '16号线': 'B3'},
+    levels: [['通道', '3号线与14、16号线之间走付费区通道'], ['B3', '14、16号线 · 两座岛式站台']],
+    shared: ['14号线', '16号线'],
+    sources: ['https://www.szmc.net/SMARTC/upload/file/20200420/1587345784379032473.pdf'],
+  },
+  八卦岭: {
+    floors: {'6号线': 'B3'},
+    levels: [['北侧', '7号线车站 · 沿换乘标识走通道'], ['B3', '6号线岛式站台 · 两侧是6号线的两个方向']],
+    reverse: '6号线',
+    sources: ['https://www.szmc.net/szmc_m/shentiejianshe/ditiejianshe/line6erqi/zhandianjieshao4/'],
+  },
+  会展中心: {
+    levels: [['B1', '1号线站厅'], ['4号线', '付费区按牛湖、福田口岸方向分别前往站台电梯']],
+    sources: ['https://www.szmc.net/szmc_m/home/xinweenzhongxin/gonggaoxinwen/201505/36126.html',
+      'https://www.szmc.net/szmc_m/shentieyunying/yunyingzixun/wuzhangaichengchezhinan/line1/'],
   },
 }
+
+function addTransferLayout(panel, arriving, departing) {
+  const layout = transferLayouts[stationName(departing.from)]
+  const guide = element('section', '', 'transfer-layout')
+  guide.append(element('h2', '换乘空间'))
+  const platforms = element('dl', '', 'transfer-platforms')
+  for (const [label, leg] of [['下车站台', arriving], ['要去的站台', departing]]) {
+    const floor = layout?.floors?.[leg.line]
+    const direction = leg.direction ? ' · 往 ' + leg.direction : ''
+    platforms.append(element('dt', label), element('dd', leg.line + direction + ' · ' + (floor || '楼层待核实')))
+  }
+  guide.append(platforms)
+
+  let advice = '站台对面关系待核实，请核对线路和方向。'
+  if (layout?.shared?.includes(arriving.line) && layout.shared.includes(departing.line)) {
+    advice = '两线有同台换乘。先看对面站台屏，核对本次方向；若方向不同，跟随站内标识。'
+  } else if (layout?.reverse === arriving.line || layout?.reverse === departing.line) {
+    const fromPlatform = layout.reverse === arriving.line
+    const leg = fromPlatform ? arriving : departing
+    const opposite = leg.opposite ? ' 往 ' + leg.opposite : ' 的另一方向'
+    advice = (fromPlatform ? '下车' : '目标') + '站台对面是 ' + leg.line + opposite + '。'
+  }
+  guide.append(element('p', advice, 'transfer-advice'))
+
+  if (layout) {
+    const levels = element('dl', '', 'transfer-levels')
+    for (const [level, description] of layout.levels) {
+      levels.append(element('dt', level), element('dd', description))
+    }
+    const sources = element('div', '', 'station-links')
+    layout.sources.forEach((href, index) => {
+      const link = element('a', index ? '补充资料 ↗' : '布局来源 ↗')
+      link.href = href
+      link.target = '_blank'
+      link.rel = 'noopener noreferrer'
+      sources.append(link)
+    })
+    guide.append(levels, sources)
+  }
+  panel.append(guide)
+}
+
+function addStationGuide(panel, name, leg, transferFrom = '') {
+  const station = stationName(name)
+  const sources = stationData.stations[station] || {}
+  const rows = Object.entries(sources)
+  const curated = stationData.curated[station]
+  const lines = stations.get(station)?.lines.map((line) => line.name) || Object.keys(sources)
+  const guide = element('section', '', 'station-guide')
+  const addReference = (container, label, url) => {
+    const link = element('a', label)
+    link.href = url
+    link.target = '_blank'
+    link.rel = 'noopener noreferrer'
+    container.append(link)
+  }
+  guide.append(element('h2', station + ' · 站内信息'))
+  if (lines.length) guide.append(element('p', '本站线路 · ' + lines.join('、')))
+  if (transferFrom && leg) {
+    guide.append(element('p', '从 ' + transferFrom + ' 下车后，跟随 ' + leg.line +
+      (leg.direction ? '「往 ' + leg.direction + '」' : '') + '的站内换乘标识。', 'station-transfer'))
+    for (const instruction of leg.walk.slice(0, 2)) {
+      guide.append(element('p', '高德步行指引 · ' + instruction))
+    }
+  }
+  const official = rows.filter(([line]) => leg?.line.split('/').includes(line))
+  const exits = [...new Set(rows.flatMap(([, row]) => row.exits))]
+  if (exits.length) guide.append(element('p', '站厅到站外电梯 · ' + exits.join('、') + ' 口'))
+  if (curated) {
+    guide.append(element('p', curated.guide))
+  } else if (official.length) {
+    const places = [...new Set(official.flatMap(([, row]) => row.platform)
+      .filter(([line, , direction]) => (!line || leg.line.includes(line)) && (!direction || direction === leg.direction))
+      .map(([, position, direction]) => [direction ? direction + '方向' : '', '付费区' + position].join(' ').trim()))]
+    if (places.length) guide.append(element('p', '站台电梯 · ' + places.join('；')))
+    if (official.some(([, row]) => row.transferLift)) {
+      guide.append(element('p', '官网列有换乘通道的电梯信息，详细位置见下方原表。'))
+    }
+  }
+  const toilets = [...new Set(rows.flatMap(([, row]) => row.toilets))]
+  if (toilets.length) guide.append(element('p', '无障碍卫生间 · ' + toilets.join('、') + ' 口附近'))
+  else if (rows.some(([, row]) => row.accessibleToilet)) guide.append(element('p', '无障碍卫生间 · 位置见官网原表'))
+  if (rows.length) {
+    const refs = element('div', '', 'station-links')
+    const sourceLines = new Set([...(curated?.lines || []), ...official.map(([line]) => line)])
+    if (!sourceLines.size) sourceLines.add(rows[0][0])
+    for (const line of sourceLines) {
+      addReference(refs, line + '官方指南 ↗', stationData.links[line])
+    }
+    guide.append(refs, element('small', '官网资料查阅于 ' + stationData.date + '。楼层和具体通道请核对现场标识。'))
+  } else {
+    guide.append(element('p', '本地暂未收录本站设施资料。请按站内标识行走。'))
+  }
+  const operatorLines = lines.filter((line) => line === '4号线' || line === '13号线')
+  if (operatorLines.length) {
+    const refs = element('div', '', 'station-links')
+    for (const line of operatorLines) {
+      const number = line.replace('号线', '')
+      addReference(refs, line + '港铁（深圳）车站查询 ↗',
+        'https://www.mtrsz.com.cn/frontend/default/src/channel/line_introduce_' + number + 'Line.html')
+    }
+    guide.append(refs)
+  }
+  panel.append(guide)
+}
+
+// Only directional, adjacent intervals with agreeing published first/last differences.
+const rideTimetables = JSON.parse($('timing-data').content.textContent)
+
+function timetableFor(leg, stationIndex = -1, gaps = []) {
+  if (!leg.complete) return null
+  const line = ['2号线', '8号线'].includes(leg.line) ? '2号线/8号线' : leg.line
+  const table = rideTimetables.lines[line]
+  if (!table) return null
+  const names = [leg.from, ...leg.stops].slice(stationIndex + 1).map(stationName)
+  const direction = table.stops.indexOf(stationName(leg.direction))
+  const start = table.stops.indexOf(names[0])
+  const end = table.stops.indexOf(names.at(-1))
+  if (direction < 0 || start < 0 || end < 0 || start === end) return null
+  const step = Math.sign(end - start)
+  if ((direction - end) * step < 0) return null
+  const segments = []
+  for (let index = 1; index < names.length; index += 1) {
+    const from = table.stops.indexOf(names[index - 1])
+    const to = table.stops.indexOf(names[index])
+    const edge = table.edges[from + ':' + to]
+    if (from < 0 || to !== from + step || !edge) {
+      gaps.push(names[index - 1] + ' → ' + names[index])
+    } else {
+      segments.push({from: names[index - 1], to: names[index], seconds: edge[0], source: edge[1]})
+    }
+  }
+  if (gaps.length) return null
+  const sources = [...new Set(segments.map((interval) => interval.source))].map((id) => rideTimetables.sources[id])
+  return {segments, sources, seconds: segments.reduce((total, interval) => total + interval.seconds, 0)}
+}
+
+function durationText(seconds) {
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  if (!minutes) return remainder + ' 秒'
+  return minutes + (remainder ? ' 分 ' + remainder + ' 秒' : ' 分钟')
+}
+
+async function referenceAmapDuration(leg, stationIndex) {
+  const start = stationIndex < 0 ? leg.from : leg.stops[stationIndex]
+  const origin = stations.get(stationName(start))
+  const destination = stations.get(stationName(leg.to))
+  if (!origin || !destination) return 0
+  const data = await api('route', {origin: origin.location, destination: destination.location})
+  const route = parseRoutes(data, start, leg.to).find(({legs}) => {
+    const [candidate] = legs
+    if (legs.length !== 1 || !candidate.seconds || candidate.line !== leg.line ||
+        stationName(candidate.from) !== origin.name || stationName(candidate.to) !== destination.name) return false
+    if (leg.direction && candidate.direction !== leg.direction) return false
+    return !leg.complete || (candidate.complete &&
+      candidate.stops.map(stationName).join('|') === leg.stops.slice(stationIndex + 1).map(stationName).join('|'))
+  })
+  return route?.legs[0].seconds || 0
+}
+
+function nativeTripInfo() {
+  if (!current || current.paused || current.stopped) return {}
+  const step = current.steps[current.index]
+  if (step?.kind === 'board') {
+    return {title: (step.index ? '换乘 ' : '乘坐 ') + step.leg.line,
+      subtitle: step.leg.from + (step.leg.direction ? ' · 往 ' + step.leg.direction + ' 方向' : ' · 请核对方向')}
+  }
+  if (step?.kind === 'ride') {
+    const arrived = step.leg.complete && current.stationIndex === step.leg.stops.length - 1
+    if (step.leg.complete && current.stationIndex >= step.leg.stops.length) {
+      const station = rideStationNames(step.leg)[current.stationIndex + 1]
+      return {title: '已过下车站 ' + step.leg.to, subtitle: station ? '你标记在 ' + station : '打开应用核对站点'}
+    }
+    return {title: step.leg.line + ' · ' + step.leg.to + ' 下车', station: step.leg.to,
+      subtitle: arrived ? '已确认到站，请下车' : '以车内报站为准', deadline: current.reminderAt || 0}
+  }
+  if (step?.kind === 'finish') return {title: '出站', subtitle: '前往 ' + current.route.end}
+  return {}
+}
+
+function syncAndroidTrip() {
+  if (!android) return
+  const info = nativeTripInfo()
+  android.syncTrip(JSON.stringify(info))
+  try {
+    if (current?.steps[current.index] && !current.stopped) {
+      const {steps, ...state} = current
+      localStorage.setItem(rideStorageKey, JSON.stringify({...state, savedAt: Date.now()}))
+    } else {
+      localStorage.removeItem(rideStorageKey)
+    }
+  } catch {
+    // The running trip is still available if storage is disabled.
+  }
+  updateTimerDisplay()
+}
+
+function restoreAndroidTrip() {
+  if (!android) return
+  try {
+    const state = JSON.parse(localStorage.getItem(rideStorageKey))
+    if (state && Array.isArray(state.route?.legs) && Date.now() - state.savedAt < 6 * 60 * 60 * 1000) {
+      const steps = stepsFor(state.route)
+      if (Number.isInteger(state.index) && steps[state.index]) {
+        current = {...state, steps}
+        if (!current.timerSource) {
+          current.reminderAt = 0
+          current.timerMinutes = 0
+          current.timerLead = undefined
+        }
+        showTrip()
+        return
+      }
+    }
+  } catch {
+    // A malformed saved trip can be replaced by a new trip.
+  }
+  syncAndroidTrip()
+}
+
+function updateTimerDisplay() {
+  const now = Date.now()
+  const info = nativeTripInfo()
+  const deadline = info.deadline || 0
+  const seconds = Math.max(0, Math.ceil((deadline - now) / 1000))
+  const clock = Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0')
+  const text = deadline ? (seconds ? '预计 ' + clock + ' 后提醒' : '预计接近下车站，请听报站') : '计时提醒未设置'
+  if ($('ride-countdown')) {
+    $('ride-countdown').textContent = text
+    $('ride-countdown').classList.toggle('timer-due', Boolean(deadline && !seconds))
+  }
+  if (!$('mini-ride').hidden) {
+    $('mini-title').textContent = info.title || '地铁单步导航'
+    $('mini-info').textContent = deadline ? text : (info.subtitle || '打开应用继续')
+  }
+}
+
+function updateReminderAccess() {
+  if (!android || !$('timer-access')) return
+  const notification = android.notificationsEnabled()
+  const exact = android.exactAlarmEnabled()
+  $('notification-access').hidden = notification
+  $('exact-access').hidden = exact
+  $('timer-access').hidden = notification && exact
+  $('timer-access-note').textContent = !notification ? '允许系统通知才能收到后台提醒。' :
+    '精确闹钟权限关闭，离开应用后可能只能收到通知。'
+}
+
+let pendingAmapLookup
+
+function addRideTimer(panel, leg, remaining) {
+  if (!android || remaining === 0) return
+  const timer = element('section', '', 'ride-timer')
+  const heading = element('h2', '预计到站提醒')
+  const countdown = element('p', '', 'ride-countdown')
+  countdown.id = 'ride-countdown'
+  const details = element('details')
+  details.id = 'ride-timer-settings'
+  const inputs = element('div', '', 'timer-inputs')
+  const makeNumber = (id, text, min, max, value) => {
+    const label = element('label', text)
+    const input = element('input')
+    input.type = 'number'
+    input.required = true
+    input.id = id
+    input.min = String(min)
+    input.max = String(max)
+    input.step = '1'
+    input.inputMode = 'numeric'
+    input.value = String(value)
+    label.append(input)
+    inputs.append(label)
+    return input
+  }
+  const stationIndex = current.stationIndex
+  const gaps = []
+  const timetable = timetableFor(leg, stationIndex, gaps)
+  const amapSeconds = stationIndex < 0 ? leg.seconds || 0 : 0
+  const initial = current.timerMinutes || Math.min(180, Math.ceil((timetable?.seconds || amapSeconds) / 60)) || ''
+  const minutes = makeNumber('timer-minutes', '还需乘车（分钟）', 1, 180, initial)
+  const lead = makeNumber('timer-early', '提前（分钟）', 0, 30,
+    current.timerLead ?? (initial ? Math.min(2, initial - 1) : 2))
+  const firstGap = gaps.length ? '缺少 ' + gaps[0] + (gaps.length > 1 ? ' 等区间的数据。' : ' 的区间数据。') : ''
+  const provenance = element('p', timetable ? '官网时刻表推算 · ' +
+    (timetable.sources.some((source) => source.minute) ? '约 ' : '') + durationText(timetable.seconds) :
+    firstGap + '可查高德参考车程，或输入剩余分钟。', 'timing-source')
+  timer.append(heading, countdown, provenance)
+  if (timetable) {
+    const segments = element('details')
+    segments.append(element('summary', '相邻站用时'), ...timetable.segments.map((segment) =>
+      element('p', segment.from + ' → ' + segment.to + ' · ' + durationText(segment.seconds))))
+    const links = element('div', '', 'station-links')
+    for (const source of timetable.sources) {
+      const link = element('a', '深圳地铁 ' + source.label + '时刻表 ↗')
+      link.href = source.url
+      link.target = '_blank'
+      link.rel = 'noopener noreferrer'
+      links.append(link)
+    }
+    segments.append(links)
+    timer.append(segments)
+  }
+  details.append(element('summary', '设置或调整计时'),
+    element('p', '车程为估算，实际到站以车内报站为准。'))
+  const reference = element('p', amapSeconds ? '高德开放平台参考值 · ' + durationText(amapSeconds) + '。' : '',
+    'timing-source')
+  reference.setAttribute('role', 'status')
+  if (!offline) {
+    const lookup = button('查询高德参考车程', async () => {
+      lookup.disabled = true
+      try {
+        if (!ready) {
+          const result = await api('status')
+          setReady(Boolean(result.configured))
+        }
+        if (!lookup.isConnected) return
+        if (!ready) {
+          pendingAmapLookup = () => { if (lookup.isConnected) lookup.click() }
+          $('key-dialog').showModal()
+          return
+        }
+        reference.textContent = '正在查询高德车程…'
+        const seconds = await referenceAmapDuration(leg, stationIndex)
+        if (!lookup.isConnected) return
+        reference.textContent = seconds ? '高德开放平台参考值 · ' + durationText(seconds) +
+          '。请确认后计时。' : '高德未找到匹配车程，请手动输入。'
+        if (seconds && !timetable && !minutes.value) {
+          minutes.value = String(Math.min(180, Math.ceil(seconds / 60)))
+          if (Number(lead.value) >= Number(minutes.value)) lead.value = String(Number(minutes.value) - 1)
+        }
+      } catch (error) {
+        if (lookup.isConnected) reference.textContent = error.message || '暂时无法取得高德车程，请手动输入。'
+      } finally {
+        lookup.disabled = false
+      }
+    }, 'quiet')
+    timer.append(lookup, reference)
+  } else if (amapSeconds) {
+    timer.append(reference)
+  }
+  const actions = element('div', '', 'actions')
+  actions.append(button('从现在开始计时', () => {
+    if (!minutes.reportValidity() || !lead.reportValidity()) return
+    if (lead.valueAsNumber >= minutes.valueAsNumber) {
+      status('trip-status', '提前量必须小于剩余车程。', true)
+      return
+    }
+    current.timerSource = 'manual'
+    current.timerMinutes = minutes.valueAsNumber
+    current.timerLead = lead.valueAsNumber
+    current.reminderAt = Date.now() + (current.timerMinutes - current.timerLead) * 60_000
+    syncAndroidTrip()
+    updateReminderAccess()
+    if (!android.notificationsEnabled()) android.requestRideNotifications()
+    status('trip-status', '提醒已按新的车程计时。')
+  }), button('关闭计时', () => {
+    current.reminderAt = 0
+    syncAndroidTrip()
+    status('trip-status', '计时提醒已关闭。')
+  }, 'quiet'))
+  details.append(inputs, actions)
+  details.open = !current.reminderAt
+  const access = element('div', '', 'timer-access')
+  access.id = 'timer-access'
+  const note = element('p')
+  note.id = 'timer-access-note'
+  const notice = button('开启通知', () => android.openNotificationSettings(), 'quiet')
+  notice.id = 'notification-access'
+  const exact = button('开启精确闹钟', () => android.openExactAlarmSettings(), 'quiet')
+  exact.id = 'exact-access'
+  access.append(note, notice, exact)
+  const alarmActions = element('div', '', 'actions')
+  alarmActions.append(button('试听闹铃', () => android.previewAlarm(), 'quiet'),
+    button('停止响铃', () => android.stopAlarm(), 'quiet'))
+  timer.append(access, details, alarmActions)
+  panel.append(timer)
+}
+
+function beginRide() {
+  advance(true)
+  if (android && !android.notificationsEnabled()) android.requestRideNotifications()
+}
+
 
 function boarding(card, step) {
   const {leg, index} = step
@@ -627,8 +1058,10 @@ function boarding(card, step) {
   const lead = leg.direction ? '往 ' + leg.direction + ' 方向' :
     leg.complete ? '看站台屏，确认下一站是 ' + leg.stops[0] : '方向数据缺失，请在站内核对列车停站。'
   const panel = setHeading(card, index ? '在 ' + leg.from + ' 换乘' : '到 ' + leg.from + ' 上车', title, lead, leg)
+  if (index) addTransferLayout(panel, current.route.legs[index - 1], leg)
   panel.append(element('p', '在 ' + leg.to + ' 下车。'))
-  panel.append(button('我已上车', advance, 'primary'))
+  panel.append(button('我已上车', beginRide, 'primary'))
+  addStationGuide(panel, leg.from, leg, current.route.legs[index - 1]?.line)
   const details = element('details')
   details.append(element('summary', '核对站内标识'))
   details.append(element('p', '把站牌的线路和方向与上方提示对照。'))
@@ -678,17 +1111,7 @@ function boarding(card, step) {
   panel.append(details)
   addDetails(panel, index ? '查看换乘步行指引' : '查看进站步行指引',
     [...leg.walk, ...(leg.entrance ? ['高德建议入口 ' + leg.entrance] : [])])
-  if (leg.from === '会展中心' && leg.line === '4号线') {
-    const source = stationSources[leg.from]
-    const info = element('details')
-    const link = element('a', '深圳地铁无障碍乘车指南')
-    link.href = source.url
-    link.target = '_blank'
-    link.rel = 'noopener noreferrer'
-    info.append(element('summary', '会展中心站参考'), element('p', source.text),
-      element('small', '来源查阅于 2026-11-20'), link)
-    panel.append(info)
-  }
+
 }
 
 let audioContext
@@ -706,38 +1129,125 @@ function playAlert() {
   }
 }
 
+function rideStationNames(leg) {
+  const planned = [leg.from, ...leg.stops].map(stationName)
+  const line = network.find((entry) => entry.name === leg.line || entry.name.split('/').includes(leg.line))
+  if (!line) return planned
+  const names = line.stops.map(([name]) => name)
+  const start = names.indexOf(planned[0])
+  const end = names.indexOf(planned.at(-1))
+  const terminal = names.indexOf(stationName(leg.direction))
+  const direction = Math.sign(end - start)
+  if (start < 0 || end < 0 || terminal < 0 || !direction ||
+      (terminal - end) * direction < 0 ||
+      !planned.every((name, index) => names[start + index * direction] === name)) return planned
+  const after = []
+  for (let index = end + direction; (terminal - index) * direction >= 0 && after.length < 2; index += direction) {
+    after.push(names[index])
+  }
+  return [...planned, ...after]
+}
+
+const rideStripObserver = typeof ResizeObserver === 'function' ?
+  new ResizeObserver(([entry]) => layoutRideStrip(entry.target, entry.contentRect.width)) : null
+
+function layoutRideStrip(track, width) {
+  const count = track.children.length
+  const columns = Math.max(1, Math.min(count, Math.floor(width / 62)))
+  if (Number(track.dataset.columns) === columns) return
+  track.dataset.columns = columns
+  track.style.setProperty('--ride-columns', columns)
+  for (const [index, item] of Array.from(track.children).entries()) {
+    const row = Math.floor(index / columns)
+    const offset = index % columns
+    const reverse = row % 2 === 1
+    item.style.gridColumn = reverse ? columns - offset : offset + 1
+    item.style.gridRow = row + 1
+    if (index === count - 1) item.dataset.link = ''
+    else if (columns === 1) item.dataset.link = 'down'
+    else if (offset === columns - 1) item.dataset.link = reverse ? 'turn-left' : 'turn-right'
+    else item.dataset.link = reverse ? 'left' : 'right'
+  }
+}
+
+function addRideStrip(panel, leg, names) {
+  const section = element('section', '', 'ride-strip')
+  const heading = element('h2', '点选当前站')
+  heading.id = 'ride-strip-label'
+  const track = element('ol', '', 'ride-strip-track')
+  track.setAttribute('aria-labelledby', heading.id)
+  track.style.setProperty('--ride-line', /^#[0-9a-f]{6}$/i.test(leg.color) ? leg.color : 'var(--green)')
+  const last = leg.stops.length - 1
+  names.forEach((name, offset) => {
+    const index = offset - 1
+    const item = element('li')
+    if (index < current.stationIndex) item.setAttribute('data-passed', '')
+    if (index >= last) item.setAttribute('data-after', '')
+    const control = button('', () => {
+      if (index === current.stationIndex) return
+      const record = () => {
+        current.stationIndex = index
+        current.timerMinutes = 0
+        const remaining = last - index
+        if (remaining <= 0) current.reminderAt = 0
+        if (remaining > current.lead || remaining < 0) current.alerted = false
+        if (!current.alerted && current.lead > 0 && remaining >= 0 && remaining <= current.lead) {
+          playAlert()
+          current.alerted = true
+        }
+        renderStep('ride-stop-' + index)
+      }
+      if (index > last) confirmEarly('确认现在到了 ' + name + '？已经过了下车站 ' + leg.to + '。', record)
+      else record()
+    }, 'ride-stop')
+    control.id = 'ride-stop-' + index
+    if (index === current.stationIndex) control.setAttribute('aria-current', 'location')
+    const marker = element('span', '', 'ride-stop-dot')
+    marker.setAttribute('aria-hidden', 'true')
+    const labels = [
+      index === current.stationIndex && '当前',
+      index === last ? '下车' : index > last ? '下车后' : index === current.stationIndex - 1 ? '上一站' : '',
+    ].filter(Boolean)
+    if (index < current.stationIndex) control.setAttribute('aria-label', name + '，已过站' + (labels.length ? '，' + labels.join('，') : ''))
+    if (index === last) control.classList.add('ride-destination')
+    control.append(marker, element('span', name), element('small', labels.join(' · ')))
+    item.append(control)
+    track.append(item)
+  })
+  section.append(heading, track)
+  panel.append(section)
+  layoutRideStrip(track, track.clientWidth)
+  rideStripObserver?.observe(track)
+}
+
 function riding(card, leg) {
   const lead = current.lead
   const stationIndex = current.stationIndex
   const remaining = leg.stops.length - 1 - stationIndex
+  const names = leg.complete ? rideStationNames(leg) : []
+  const station = names[stationIndex + 1] || (stationIndex < 0 ? leg.from : leg.stops[stationIndex])
+  const passed = leg.complete && remaining < 0
   const alert = remaining > 0 && remaining <= lead && leg.complete
-  const panel = setHeading(card, '乘车中', '在 ' + leg.to + ' 下车',
-    remaining === 0 ? '已确认到站，请下车。' : '听车内报站，确认实际到达的站。', leg)
+  const panel = setHeading(card, '乘车中', passed ? '已过下车站 ' + leg.to : '在 ' + leg.to + ' 下车',
+    passed ? '你标记在 ' + station + '。可在本站下车，再规划路线。' :
+      remaining === 0 ? '已确认到站，请下车。' : '听车内报站，确认实际到达的站。', leg)
   if (leg.complete) {
     if (alert) panel.append(element('p', '还有 ' + remaining + ' 站，准备下车。', 'station alert'))
-    if (remaining > 0) {
-      const label = element('label', '点选当前站')
-      label.htmlFor = 'at-station'
-      const select = element('select')
-      select.id = 'at-station'
-      for (const [index, name] of [leg.from, ...leg.stops].entries()) {
-        select.append(new Option(name, String(index - 1)))
-      }
-      select.value = String(stationIndex)
-      select.addEventListener('change', () => {
-        current.stationIndex = Number(select.value)
-        const left = leg.stops.length - 1 - current.stationIndex
-        if (left > current.lead) current.alerted = false
-        if (!current.alerted && current.lead > 0 && left <= current.lead) {
-          playAlert()
-          current.alerted = true
-        }
-        renderStep('at-station')
-      })
-      panel.append(label, select)
-    }
+    addRideStrip(panel, leg, names)
   } else {
     panel.append(element('p', '高德未返回完整站序，请以车内报站为准。', 'station'))
+  }
+  if (passed) {
+    if (!offline) panel.append(button('从 ' + station + ' 重新规划', () => {
+      const destination = current.route.end
+      showPlanner(false)
+      $('origin').value = station
+      $('destination').value = destination
+      for (const input of [$('origin'), $('destination')]) input.dispatchEvent(new Event('input'))
+      $('plan-button').focus()
+    }, 'primary'))
+    if (station) addStationGuide(panel, station, leg)
+    return
   }
   const next = button('我已下车', () => {
     if (leg.complete && current.stationIndex !== leg.stops.length - 1) {
@@ -747,8 +1257,11 @@ function riding(card, leg) {
     }
   }, 'primary')
   panel.append(next)
+  addRideTimer(panel, leg, remaining)
+  if (station) addStationGuide(panel, station, leg)
   if (leg.complete) {
     const details = element('details')
+    details.id = 'manual-reminder-settings'
     const label = element('label', '提前量')
     label.htmlFor = 'reminder-lead'
     const select = element('select')
@@ -782,7 +1295,7 @@ function riding(card, leg) {
       option.append(input, ' ' + name)
       settings.append(option)
     }
-    details.append(element('summary', '提醒设置'), element('p', '只有你点选实际到达的站时，页面才判断是否提醒。'),
+    details.append(element('summary', '手动选站提醒'), element('p', '选择实际到达的站后，按剩余站数提示。'),
       label, select, settings)
     panel.append(details)
   }
@@ -802,6 +1315,7 @@ function confirmEarly(message, action) {
 }
 
 function renderStep(focusId = 'step-title', reminderOpen = false) {
+  rideStripObserver?.disconnect()
   const panel = $('step')
   panel.replaceChildren()
   panel.className = 'card step'
@@ -817,6 +1331,9 @@ function renderStep(focusId = 'step-title', reminderOpen = false) {
   $('restart').hidden = !offline
   $('change').hidden = offline
   $('export').hidden = offline
+  const miniAvailable = Boolean(android && !paused && !stopped && step && android.supportsMiniWindow())
+  $('mini-window').hidden = !miniAvailable
+  $('quick-mini-window').hidden = !miniAvailable
   if (stopped) {
     const body = setHeading(panel, '行程已结束', '已退出导航')
     body.append(button('从头开始', () => startTrip(route), 'primary'))
@@ -830,6 +1347,7 @@ function renderStep(focusId = 'step-title', reminderOpen = false) {
     const body = setHeading(panel, '行程完成', '到达 ' + route.end)
     body.append(button(offline ? '从头开始' : '规划新路线',
       () => offline ? startTrip(route) : showPlanner(false), 'primary'))
+    addStationGuide(body, route.legs.at(-1).to, route.legs.at(-1))
   } else if (step.kind === 'board') {
     boarding(panel, step)
   } else if (step.kind === 'ride') {
@@ -839,11 +1357,15 @@ function renderStep(focusId = 'step-title', reminderOpen = false) {
       route.exit ? '高德建议出口 ' + route.exit : '按现场标识选择出口。')
     body.append(button('我已到达', advance, 'primary'))
     addDetails(body, '查看出站步行指引', route.finalWalk)
+    addStationGuide(body, route.legs.at(-1).to, route.legs.at(-1))
   }
   if (step && index > 0 && !paused && !stopped) {
     panel.querySelector('.step-body').append(button('上一步', retreat, 'quiet'))
   }
-  if (reminderOpen && panel.querySelector('details')) panel.querySelector('details').open = true
+  if (reminderOpen && $('manual-reminder-settings')) $('manual-reminder-settings').open = true
+  syncAndroidTrip()
+  updateReminderAccess()
+  if (focusId === 'step-title') window.scrollTo(0, 0)
   const focusTarget = $(focusId) || panel.querySelector('h1')
   focusTarget.focus({preventScroll: true})
 }
@@ -890,6 +1412,7 @@ $('trip-menu').addEventListener('click', () => options.showModal())
 $('pause').addEventListener('click', () => {
   options.close()
   current.paused = !current.paused
+  if (current.paused) current.reminderAt = 0
   status('trip-status')
   renderStep()
 })
@@ -919,6 +1442,12 @@ $('exit').addEventListener('click', () => {
     renderStep()
   })
 })
+for (const id of ['mini-window', 'quick-mini-window']) {
+  $(id).addEventListener('click', () => {
+    if (options.open) options.close()
+    android?.openMiniWindow()
+  })
+}
 $('export').addEventListener('click', async () => {
   options.close()
   try {
@@ -930,6 +1459,17 @@ $('export').addEventListener('click', async () => {
   }
 })
 if (android) {
+  $('key-help').textContent = '使用同一把高德 Web 服务 Key。验证通过后会加密保存在这台手机，重开应用会自动读取。'
+  window.refreshAndroidReminder = () => {
+    syncAndroidTrip()
+    updateReminderAccess()
+  }
+  window.setMetroMiniMode = (mini) => {
+    document.body.classList.toggle('mini-mode', mini)
+    $('mini-ride').hidden = !mini
+    updateTimerDisplay()
+  }
+  setInterval(updateTimerDisplay, 1000)
   window.handleAndroidBack = () => {
     const dialog = document.querySelector('dialog[open]')
     if (dialog) {
@@ -947,6 +1487,7 @@ if (offline) {
   startTrip(JSON.parse(offlineText))
 } else {
   initMap()
+  restoreAndroidTrip()
   $('demo-button').addEventListener('click', () => startTrip(demo))
   $('return-trip').addEventListener('click', showTrip)
   $('key-open').addEventListener('click', () => $('key-dialog').showModal())
@@ -958,11 +1499,17 @@ if (offline) {
     status('key-status', '正在验证 Key…')
     try {
       const key = $('key').value.trim()
-      await api('key', {key})
+      const result = await api('key', {key})
       setReady(true)
       status('key-status')
+      const pending = pendingAmapLookup
+      pendingAmapLookup = undefined
       $('key-dialog').close()
       status('plan-status', '高德已连接。规划后可查看高德方案。')
+      if (android && result.persisted === false) {
+        status($('trip').hidden ? 'plan-status' : 'trip-status', 'Key 本次可用，但手机未能保存。', true)
+      }
+      pending?.()
     } catch (error) {
       status('key-status', error.message.includes('10009') ?
         'Key 类型与接口不符（10009）。请在高德控制台添加「Web 服务」Key。' : error.message, true)
@@ -971,7 +1518,19 @@ if (offline) {
       control.disabled = false
     }
   })
-  $('key-dialog').addEventListener('close', () => $('key').value = '')
+  $('key-dialog').addEventListener('close', () => {
+    $('key').value = ''
+    pendingAmapLookup = undefined
+  })
+  $('clear-amap-key').addEventListener('click', async () => {
+    try {
+      await api('key', {clear: true})
+      setReady(false)
+      status('key-status', '已清除本机 Key。')
+    } catch (error) {
+      status('key-status', error.message, true)
+    }
+  })
   $('plan-form').addEventListener('submit', (event) => {
     event.preventDefault()
     runPlan(queryRoutes, $('plan-button'))

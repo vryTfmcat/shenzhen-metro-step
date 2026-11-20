@@ -1,28 +1,55 @@
 package local.metrostep.android;
 
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.net.Uri;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
+import android.util.Base64;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
+import java.util.Arrays;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.net.ssl.HttpsURLConnection;
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 final class AmapApi {
+    private static final String ALIAS = "metro-amap-key-v1";
+    private static final int IV_BYTES = 12;
     private static final Pattern KEY = Pattern.compile("[a-fA-F0-9]{32}");
     private static final Pattern COORDINATES = Pattern.compile(
             "(-?\\d{1,3}(?:\\.\\d{1,6})?),(-?\\d{1,2}(?:\\.\\d{1,6})?)");
-    private volatile String key = "";
+    private final SharedPreferences storage;
+    private volatile String key;
+
+    AmapApi(Context context) {
+        storage = context.getSharedPreferences("metro_amap", Context.MODE_PRIVATE);
+        key = restore();
+    }
 
     JSONObject handle(String path, JSONObject body) throws JSONException {
         switch (path) {
             case "/api/status":
                 return new JSONObject().put("configured", !key.isEmpty());
             case "/api/key":
+                if (body.optBoolean("clear")) {
+                    if (!storage.edit().remove("credential").commit()) {
+                        throw new IllegalArgumentException("无法清除本机 Key，请重试。");
+                    }
+                    key = "";
+                    return new JSONObject().put("configured", false);
+                }
                 String candidate = body.optString("key");
                 if (!KEY.matcher(candidate).matches()) {
                     throw new IllegalArgumentException("请输入 32 位高德 Web 服务 Key。");
@@ -33,7 +60,7 @@ final class AmapApi {
                         .appendQueryParameter("city", "0755")
                         .appendQueryParameter("citylimit", "true"));
                 key = candidate;
-                return new JSONObject().put("configured", true);
+                return new JSONObject().put("configured", true).put("persisted", persist(candidate));
             case "/api/route":
                 String currentKey = key;
                 if (currentKey.isEmpty()) {
@@ -53,6 +80,53 @@ final class AmapApi {
                         .appendQueryParameter("extensions", "all"));
             default:
                 throw new IllegalArgumentException("请求地址无效。");
+        }
+    }
+
+    private static synchronized SecretKey encryptionKey(boolean create)
+            throws GeneralSecurityException, IOException {
+        KeyStore keystore = KeyStore.getInstance("AndroidKeyStore");
+        keystore.load(null);
+        if (keystore.containsAlias(ALIAS)) return (SecretKey) keystore.getKey(ALIAS, null);
+        if (!create) throw new GeneralSecurityException("Key unavailable");
+        KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        generator.init(new KeyGenParameterSpec.Builder(ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .build());
+        return generator.generateKey();
+    }
+
+    private String restore() {
+        String saved = storage.getString("credential", "");
+        if (saved.isEmpty()) return "";
+        try {
+            byte[] encoded = Base64.decode(saved, Base64.NO_WRAP);
+            if (encoded.length != IV_BYTES + 32 + 16) return "";
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, encryptionKey(false),
+                    new GCMParameterSpec(128, encoded, 0, IV_BYTES));
+            String candidate = new String(cipher.doFinal(encoded, IV_BYTES, encoded.length - IV_BYTES),
+                    StandardCharsets.US_ASCII);
+            return KEY.matcher(candidate).matches() ? candidate : "";
+        } catch (GeneralSecurityException | IOException | IllegalArgumentException error) {
+            return "";
+        }
+    }
+
+    private boolean persist(String candidate) {
+        try {
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, encryptionKey(true));
+            byte[] iv = cipher.getIV();
+            if (iv.length != IV_BYTES) return false;
+            byte[] ciphertext = cipher.doFinal(candidate.getBytes(StandardCharsets.US_ASCII));
+            byte[] encoded = Arrays.copyOf(iv, iv.length + ciphertext.length);
+            System.arraycopy(ciphertext, 0, encoded, iv.length, ciphertext.length);
+            return storage.edit().putString("credential", Base64.encodeToString(encoded, Base64.NO_WRAP)).commit();
+        } catch (GeneralSecurityException | IOException error) {
+            return false;
         }
     }
 

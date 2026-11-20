@@ -45,7 +45,7 @@ $aligned = Join-Path $build 'aligned.apk'
 $signed = Join-Path $build 'signed.apk'
 
 Invoke-BuildTool $aapt2 @('compile', '--dir', (Join-Path $build 'res'), '-o', $resources)
-Invoke-BuildTool $aapt2 @('link', '-I', $stagedJar, '--manifest', $stagedManifest, '-A', $assets, '-o', $unsigned, $resources)
+Invoke-BuildTool $aapt2 @('link', '-I', $stagedJar, '--manifest', $stagedManifest, '-A', $assets, '--java', (Join-Path $build 'src'), '-o', $unsigned, $resources)
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $build 'src') -Recurse -Filter '*.java' |
     ForEach-Object FullName)
 Invoke-BuildTool $javac (@('--release', '8', '-encoding', 'UTF-8', '-classpath', $stagedJar, '-d', $classes) + $sources)

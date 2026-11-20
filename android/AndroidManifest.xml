@@ -1,11 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="local.metrostep.android"
-    android:versionCode="2"
-    android:versionName="0.1.1">
+    android:versionCode="9"
+    android:versionName="0.2.6">
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_metro"
@@ -17,11 +23,16 @@
             android:authorities="local.metrostep.android.capture"
             android:exported="false"
             android:grantUriPermissions="true" />
+        <receiver android:name=".TripReminder" android:exported="false" />
+        <service android:name=".AlarmPlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:enableOnBackInvokedCallback="false"
             android:exported="true"
+            android:supportsPictureInPicture="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

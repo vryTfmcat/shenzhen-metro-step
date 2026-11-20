@@ -1,0 +1,20 @@
+# Local credentials and signing material
+.env
+.env.*
+*.p12
+*.jks
+*.keystore
+*.dpapi
+local.properties
+private-data/
+
+# Local toolchains and outputs
+tools/
+cache/
+build/
+releases/
+*.apk
+*.aab
+*.idsig
+__pycache__/
+.venv/
